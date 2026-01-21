@@ -1,7 +1,7 @@
 # System Configuration
 
 backtest:
-  data_path: "../cryptodata"
+  data_path: "cryptodata"
   default_symbol: "BTCUSDT"
   initial_capital: 10000.0
 

@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 use chrono::{DateTime, Utc};
 use anyhow::Result;
 use polars::prelude::*;
+use tracing::{info, error};
 
 use crate::{
     data::DataLoader,
@@ -60,6 +61,8 @@ pub async fn run_backtest(
     State(state): State<AppState>,
     Json(payload): Json<RunBacktestRequest>,
 ) -> impl IntoResponse {
+    info!("Received backtest request for symbol: {}, start: {}, end: {}, capital: {}", 
+        payload.symbol, payload.start_date, payload.end_date, payload.initial_capital);
     let backtest_id = uuid::Uuid::new_v4().to_string();
     let id_clone = backtest_id.clone();
     
@@ -88,7 +91,7 @@ pub async fn run_backtest(
             let lf_indicators = crate::indicators::add_indicators(lf)?;
             
             let df = lf_indicators.collect()?;
-            let candles = candle_from_df(&df)?;
+            let candles = candle_from_df(&df, &payload.symbol)?;
             
             let mut engine = BacktestEngine::new(payload.initial_capital);
             let strategy = MATouchStrategy::new(&df);
@@ -98,6 +101,13 @@ pub async fn run_backtest(
 
         match result {
             Ok(trades) => {
+                if !trades.is_empty() {
+                    info!("DEBUG: First trade Symbol: {}, Entry: {:?}", trades[0].symbol, trades[0].entry_time);
+                    if trades[0].symbol == "Unknown" {
+                       error!("CRITICAL: Symbol is still Unknown!");
+                    }
+                }
+                info!("Backtest {} completed successfully with {} trades", backtest_id, trades.len());
                 let mut map = backtest_map.lock().unwrap();
                 map.insert(backtest_id.clone(), BacktestStatus::Completed(trades));
                 let _ = tx.send(ProgressUpdate {
@@ -107,6 +117,7 @@ pub async fn run_backtest(
                 });
             }
             Err(e) => {
+                error!("Backtest {} failed: {}", backtest_id, e);
                 let mut map = backtest_map.lock().unwrap();
                 map.insert(backtest_id.clone(), BacktestStatus::Failed(e.to_string()));
                 let _ = tx.send(ProgressUpdate {
@@ -165,7 +176,103 @@ pub async fn list_symbols() -> impl IntoResponse {
     Json(vec!["BTCUSDT", "ETHUSDT"])
 }
 
-fn candle_from_df(df: &DataFrame) -> Result<Vec<crate::data::Candle>> {
+// ... existing code ...
+
+#[derive(Deserialize)]
+pub struct GetChartRequest {
+    pub symbol: String,
+    pub timestamp: i64, // Entry time in seconds
+}
+
+use axum::response::Response;
+use axum::http::header;
+
+pub async fn get_chart_image(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<GetChartRequest>,
+) -> impl IntoResponse {
+    let entry_time = DateTime::from_timestamp(params.timestamp, 0).unwrap_or(Utc::now());
+    
+    // Load range: +/- 60 days
+    let start_load = entry_time - chrono::Duration::days(60);
+    let end_load = entry_time + chrono::Duration::days(60);
+    
+    let df_result = state.data_loader.load_candles(&params.symbol, start_load, end_load);
+    
+    match df_result {
+        Ok(df) => {
+            let lf = df.lazy();
+            
+            // 1. Daily Resampling (entire 120 days)
+            let daily_lf = lf.clone()
+                .group_by_dynamic(
+                    col("open_time"),
+                    vec![],
+                    DynamicGroupOptions {
+                        every: String::from("1d"),
+                        period: String::from("1d"),
+                        offset: String::from("0s"),
+                        ..Default::default()
+                    }
+                )
+                .agg(vec![
+                    col("open").first(),
+                    col("high").max(),
+                    col("low").min(),
+                    col("close").last(),
+                ])
+                .collect();
+
+            // 2. Hourly Resampling (focus on +/- 5 days)
+            let start_hourly = entry_time - chrono::Duration::days(5);
+            let end_hourly = entry_time + chrono::Duration::days(5);
+            
+            let hourly_lf = lf
+                .filter(col("open_time").gt_eq(lit(start_hourly.naive_utc())))
+                .filter(col("open_time").lt_eq(lit(end_hourly.naive_utc())))
+                .group_by_dynamic(
+                    col("open_time"),
+                    vec![],
+                    DynamicGroupOptions {
+                        every: String::from("1h"),
+                        period: String::from("1h"),
+                        offset: String::from("0s"),
+                        ..Default::default()
+                    }
+                )
+                .agg(vec![
+                    col("open").first(),
+                    col("high").max(),
+                    col("low").min(),
+                    col("close").last(),
+                ])
+                .collect();
+
+            if let (Ok(daily_df), Ok(hourly_df)) = (daily_lf, hourly_lf) {
+                // Generate Chart
+                match crate::charting::generate_stacked_chart(&hourly_df, &daily_df, params.timestamp) {
+                    Ok(bytes) => {
+                        return Response::builder()
+                            .header(header::CONTENT_TYPE, "image/png")
+                            .body(axum::body::Body::from(bytes))
+                            .unwrap();
+                    },
+                    Err(e) => error!("Failed to generate chart: {}", e),
+                }
+            } else {
+                error!("Failed to resample data");
+            }
+        },
+        Err(e) => error!("Failed to load data for chart: {}", e),
+    }
+
+    Response::builder()
+        .status(500)
+        .body(axum::body::Body::from("Failed to generate chart"))
+        .unwrap()
+}
+
+fn candle_from_df(df: &DataFrame, symbol: &str) -> Result<Vec<crate::data::Candle>> {
     use crate::data::Candle;
     
     let open_time = df.column("open_time")?.datetime()?.as_datetime_iter();
@@ -189,7 +296,7 @@ fn candle_from_df(df: &DataFrame) -> Result<Vec<crate::data::Candle>> {
              let utc_time = DateTime::from_naive_utc_and_offset(t, Utc);
              
              candles.push(Candle {
-                 symbol: "Unknown".to_string(), 
+                 symbol: symbol.to_string(), 
                  open_time: utc_time,
                  open: opens[i],
                  high: highs[i],

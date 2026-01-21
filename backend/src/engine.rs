@@ -58,9 +58,7 @@ pub struct Trade {
     pub quantity: f64,
     pub profit_pct: f64,
     pub profit_abs: f64,
-    #[serde(with = "chrono::serde::ts_seconds")]
     pub entry_time: DateTime<Utc>,
-    #[serde(with = "chrono::serde::ts_seconds")]
     pub exit_time: DateTime<Utc>,
     pub exit_reason: String,
 }

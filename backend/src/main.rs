@@ -55,6 +55,7 @@ async fn main() {
         .route("/api/backtest/progress/{id}", get(api::get_progress_sse))
         .route("/api/backtest/result/{id}", get(api::get_result))
         .route("/api/data/symbols", get(api::list_symbols))
+        .route("/api/chart", get(api::get_chart_image))
         .with_state(app_state)
         .layer(tower_http::cors::CorsLayer::permissive());
 

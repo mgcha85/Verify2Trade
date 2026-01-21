@@ -11,7 +11,7 @@
   let trades: Trade[] = [];
   let isRunning = false;
 
-  const API_BASE = 'http://localhost:3000/api';
+  const API_BASE = 'http://localhost:3100/api';
 
   async function handleStart(event: CustomEvent) {
     const params = event.detail;

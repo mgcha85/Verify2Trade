@@ -1,5 +1,5 @@
 # Build Stage
-FROM rust:1.84-slim-bookworm as builder
+FROM rust:1.88-slim-bookworm as builder
 
 WORKDIR /usr/src/app
 COPY . .
@@ -7,6 +7,7 @@ COPY . .
 # Install dependencies for DuckDB/Polars if needed (usually static, but duckdb might need libs)
 RUN apt-get update && apt-get install -y pkg-config libssl-dev g++
 
+ENV CACHE_BUST=2026-01-21-08-00
 RUN cargo build --release
 
 # Runtime Stage
