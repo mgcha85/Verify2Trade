@@ -16,6 +16,7 @@ use crate::{
     engine::{BacktestEngine, Trade},
     strategy::ma_touch::MATouchStrategy,
     ai::AIClient,
+    settings::Settings,
 };
 
 #[derive(Clone)]
@@ -24,6 +25,7 @@ pub struct AppState {
     pub backtests: Arc<Mutex<HashMap<String, BacktestStatus>>>,
     pub progress_tx: broadcast::Sender<ProgressUpdate>,
     pub ai_client: Arc<AIClient>,
+    pub settings: Arc<Settings>,
 }
 
 #[derive(Clone, Debug, Serialize)]

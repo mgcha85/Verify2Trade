@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub struct Candle {
     pub symbol: String,
     #[serde(with = "chrono::serde::ts_seconds")]
-    pub open_time: DateTime<Utc>, // Polars might load as naive, but we treat as Utc
+    pub open_time: DateTime<Utc>,
     pub open: f64,
     pub high: f64,
     pub low: f64,
@@ -43,10 +43,14 @@ impl DataLoader {
 
         // Scan parquet
         let args = ScanArgsParquet::default();
+
+        // Use 'timestamp' column which exists in parquet, then rename to 'open_time'
+        // Filter and sort using original column name to avoid pushdown errors
         let lf = LazyFrame::scan_parquet(path.join("**/*.parquet"), args)?
-            .filter(col("open_time").gt_eq(lit(start_time.naive_utc())))
-            .filter(col("open_time").lt_eq(lit(end_time.naive_utc())))
-            .sort("open_time", SortMultipleOptions::default());
+            .filter(col("timestamp").gt_eq(lit(start_time.naive_utc())))
+            .filter(col("timestamp").lt_eq(lit(end_time.naive_utc())))
+            .sort(vec!["timestamp"], SortMultipleOptions::default())
+            .with_column(col("timestamp").alias("open_time"));
 
         Ok(lf.collect()?)
     }

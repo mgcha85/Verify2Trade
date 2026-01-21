@@ -2,13 +2,18 @@ version: '3.8'
 
 services:
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "3100:3000"
     volumes:
       - ./cryptodata:/app/cryptodata
+      - ./config.yaml:/app/config.yaml
+      - ./.env:/app/.env
     environment:
       - RUST_LOG=info
+      - API_PORT=3000
     restart: unless-stopped
 
   frontend:

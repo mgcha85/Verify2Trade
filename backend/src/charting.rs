@@ -1,5 +1,7 @@
 use anyhow::Result;
+use plotters::prelude::*;
 use polars::prelude::*;
+use std::path::Path;
 
 pub fn generate_candle_chart(df: &DataFrame, output_path: &Path, title: &str) -> Result<()> {
     // Expect columns: open_time, open, high, low, close

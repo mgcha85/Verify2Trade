@@ -5,6 +5,7 @@ mod strategy;
 mod charting;
 mod api;
 mod ai;
+mod settings;
 
 use axum::{
     routing::{get, post},
@@ -13,13 +14,15 @@ use axum::{
 use std::{net::SocketAddr, sync::{Arc, Mutex}, collections::HashMap};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tokio::sync::broadcast;
-use crate::{data::DataLoader, api::AppState, ai::AIClient};
+use crate::{data::DataLoader, api::AppState, ai::AIClient, settings::Settings};
 use dotenvy::dotenv;
 use std::env;
 
 #[tokio::main]
 async fn main() {
     dotenv().ok(); 
+
+    let settings = Settings::new().expect("Failed to load configuration");
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
@@ -39,17 +42,18 @@ async fn main() {
     let (tx, _rx) = broadcast::channel(100);
     
     let app_state = AppState {
-        data_loader: Arc::new(DataLoader::new("../cryptodata")), 
+        data_loader: Arc::new(DataLoader::new(&settings.backtest.data_path)), 
         backtests: Arc::new(Mutex::new(HashMap::new())),
         progress_tx: tx,
         ai_client: Arc::new(ai_client),
+        settings: Arc::new(settings.clone()),
     };
 
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/api/backtest/run", post(api::run_backtest))
-        .route("/api/backtest/progress/:id", get(api::get_progress_sse))
-        .route("/api/backtest/result/:id", get(api::get_result))
+        .route("/api/backtest/progress/{id}", get(api::get_progress_sse))
+        .route("/api/backtest/result/{id}", get(api::get_result))
         .route("/api/data/symbols", get(api::list_symbols))
         .with_state(app_state)
         .layer(tower_http::cors::CorsLayer::permissive());
