@@ -110,10 +110,13 @@
             </td>
             <td>{trade.exit_reason}</td>
             <td>
-              <button
-                class="btn btn-xs btn-primary"
-                on:click={() => viewChart(trade)}>View</button
-              >
+              <!-- svelte-ignore a11y-click-events-have-key-events -->
+              <img
+                src={`${API_BASE}/chart?symbol=${trade.symbol}&timestamp=${Math.floor(new Date(trade.entry_time).getTime() / 1000)}`}
+                alt="Chart"
+                class="h-32 cursor-pointer hover:scale-110 transition-transform border border-gray-300"
+                on:click={() => viewChart(trade)}
+              />
             </td>
           </tr>
         {/each}

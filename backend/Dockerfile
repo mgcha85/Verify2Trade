@@ -8,7 +8,7 @@ COPY . .
 RUN apt-get update && apt-get install -y pkg-config libssl-dev g++
 
 ENV CACHE_BUST=2026-01-21-08-00
-RUN cargo build --release
+RUN cargo build
 
 # Runtime Stage
 FROM debian:bookworm-slim
@@ -16,9 +16,9 @@ FROM debian:bookworm-slim
 WORKDIR /app
 
 # Install runtime dependencies
-RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y libssl3 ca-certificates fonts-dejavu fontconfig && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/src/app/target/release/backend /app/backend
+COPY --from=builder /usr/src/app/target/debug/backend /app/backend
 
 # Data directory needs to be mounted
 VOLUME /app/cryptodata

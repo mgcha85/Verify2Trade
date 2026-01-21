@@ -191,11 +191,25 @@ pub async fn get_chart_image(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<GetChartRequest>,
 ) -> impl IntoResponse {
+    let filename = format!("{}_{}.png", params.symbol, params.timestamp);
+    let file_path = std::path::Path::new("/app/static/charts").join(&filename);
+
+    // 1. Check if file exists
+    if file_path.exists() {
+        if let Ok(bytes) = std::fs::read(&file_path) {
+            return Response::builder()
+                .header(header::CONTENT_TYPE, "image/png")
+                .body(axum::body::Body::from(bytes))
+                .unwrap();
+        }
+    }
+
+    // 2. Generate if not exists
     let entry_time = DateTime::from_timestamp(params.timestamp, 0).unwrap_or(Utc::now());
     
-    // Load range: +/- 60 days
-    let start_load = entry_time - chrono::Duration::days(60);
-    let end_load = entry_time + chrono::Duration::days(60);
+    // Load data BEFORE entry time: -400 days to entry (to cover MA400)
+    let start_load = entry_time - chrono::Duration::days(400);
+    let end_load = entry_time;
     
     let df_result = state.data_loader.load_candles(&params.symbol, start_load, end_load);
     
@@ -203,15 +217,15 @@ pub async fn get_chart_image(
         Ok(df) => {
             let lf = df.lazy();
             
-            // 1. Daily Resampling (entire 120 days)
+            // Daily Resampling (for all loaded data)
             let daily_lf = lf.clone()
                 .group_by_dynamic(
                     col("open_time"),
                     vec![],
                     DynamicGroupOptions {
-                        every: String::from("1d"),
-                        period: String::from("1d"),
-                        offset: String::from("0s"),
+                        every: Duration::parse("1d"),
+                        period: Duration::parse("1d"),
+                        offset: Duration::parse("0s"),
                         ..Default::default()
                     }
                 )
@@ -223,20 +237,15 @@ pub async fn get_chart_image(
                 ])
                 .collect();
 
-            // 2. Hourly Resampling (focus on +/- 5 days)
-            let start_hourly = entry_time - chrono::Duration::days(5);
-            let end_hourly = entry_time + chrono::Duration::days(5);
-            
+            // 5-minute resampling (entire range for MA calculations)
             let hourly_lf = lf
-                .filter(col("open_time").gt_eq(lit(start_hourly.naive_utc())))
-                .filter(col("open_time").lt_eq(lit(end_hourly.naive_utc())))
                 .group_by_dynamic(
                     col("open_time"),
                     vec![],
                     DynamicGroupOptions {
-                        every: String::from("1h"),
-                        period: String::from("1h"),
-                        offset: String::from("0s"),
+                        every: Duration::parse("5m"),
+                        period: Duration::parse("5m"),
+                        offset: Duration::parse("0s"),
                         ..Default::default()
                     }
                 )
@@ -249,9 +258,16 @@ pub async fn get_chart_image(
                 .collect();
 
             if let (Ok(daily_df), Ok(hourly_df)) = (daily_lf, hourly_lf) {
-                // Generate Chart
+                // Generate and Save
                 match crate::charting::generate_stacked_chart(&hourly_df, &daily_df, params.timestamp) {
                     Ok(bytes) => {
+                        // Ensure directory exists
+                        let _ = std::fs::create_dir_all("/app/static/charts");
+                        // Save to file
+                        if let Err(e) = std::fs::write(&file_path, &bytes) {
+                             error!("Failed to save chart to file: {}", e);
+                        }
+                        
                         return Response::builder()
                             .header(header::CONTENT_TYPE, "image/png")
                             .body(axum::body::Body::from(bytes))

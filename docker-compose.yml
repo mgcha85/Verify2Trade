@@ -11,15 +11,22 @@ services:
       - ./cryptodata:/app/cryptodata
       - ./config.yaml:/app/config.yaml
       - ./.env:/app/.env
+      - ./charts:/app/static/charts
     environment:
       - RUST_LOG=info
       - API_PORT=3000
     restart: unless-stopped
+    networks:
+      - default
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     ports:
       - "8080:80"
+    volumes:
+      - ./charts:/usr/share/nginx/html/charts
     depends_on:
       - backend
     restart: unless-stopped
