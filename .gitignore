@@ -32,10 +32,12 @@ Thumbs.db
 # Data
 /cryptodata
 /cryptodata/*
+charts/
 !/cryptodata/.gitkeep
 backtest.db
 backtest.db-shm
 backtest.db-wal
+*.png
 
 # Build Artifacts
 build/

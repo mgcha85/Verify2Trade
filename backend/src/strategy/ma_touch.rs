@@ -2,11 +2,17 @@ use crate::data::Candle;
 use crate::engine::{Position, Side, Signal, Strategy};
 use polars::prelude::*;
 
+/// MA25 Retest Strategy (Short only)
+/// Entry condition:
+/// 1. Price was ABOVE MA25, then breaks BELOW (breakdown)
+/// 2. Price comes back up and touches MA25 from below (retest)
+/// 3. Current candle: high touches MA25, but closes below MA25 (rejection)
 pub struct MATouchStrategy {
     ma_25: Vec<f64>,
 
-    // State
-    price_was_below_ma: bool,
+    // State tracking
+    was_above_ma: bool,        // Was price ever above MA25?
+    had_breakdown: bool,       // Did price break below MA25 after being above?
     partial_profit_taken: bool,
 }
 
@@ -22,7 +28,8 @@ impl MATouchStrategy {
 
         Self {
             ma_25,
-            price_was_below_ma: false,
+            was_above_ma: false,
+            had_breakdown: false,
             partial_profit_taken: false,
         }
     }
@@ -45,32 +52,43 @@ impl Strategy for MATouchStrategy {
         if position.is_none() {
             self.partial_profit_taken = false;
 
-            // Check if price is/was below MA
-            if candle.close < ma {
-                self.price_was_below_ma = true;
-            } else if candle.low > ma {
-                self.price_was_below_ma = false;
+            // Step 1: Track if price was above MA25
+            if candle.close > ma && candle.low > ma {
+                // Price is clearly above MA25
+                self.was_above_ma = true;
+                self.had_breakdown = false;  // Reset breakdown
             }
 
-            // Entry trigger: price was below MA, touched MA (High >= MA), and rejected (Close < MA)
-            if self.price_was_below_ma && candle.high >= ma && candle.close < ma {
+            // Step 2: Detect breakdown (price breaks below MA25 after being above)
+            if self.was_above_ma && candle.close < ma {
+                self.had_breakdown = true;
+                self.was_above_ma = false;  // Reset above state
+            }
+
+            // Step 3: Entry trigger - Retest rejection
+            // After breakdown, price touches MA25 (high >= MA) but closes below (rejection)
+            if self.had_breakdown && candle.high >= ma && candle.close < ma {
                 // Log entry for debugging
                 tracing::info!(
-                    "ENTRY TRIGGERED: time={:?}, high={:.2}, low={:.2}, close={:.2}, ma25={:.2}, high>=ma:{}, close<ma:{}",
+                    "RETEST ENTRY: time={:?}, high={:.2}, low={:.2}, close={:.2}, ma25={:.2}",
                     candle.open_time,
                     candle.high,
                     candle.low,
                     candle.close,
-                    ma,
-                    candle.high >= ma,
-                    candle.close < ma
+                    ma
                 );
                 // Open Short with 1/4 account size
                 let amount = equity * 0.25;
+                self.had_breakdown = false;  // Reset after entry
                 return Signal::Open(Side::Short, amount);
             }
+
+            // Reset if price goes clearly above MA25 again (invalidates breakdown)
+            if candle.low > ma {
+                self.had_breakdown = false;
+            }
         } else if let Some(pos) = position {
-            let price_change_pct =
+            let _price_change_pct =
                 (candle.close - pos.average_entry_price) / pos.average_entry_price;
 
             // Pyramiding: Add if price rises 2% above first entry (averaging down for short)
@@ -86,9 +104,6 @@ impl Strategy for MATouchStrategy {
             }
 
             // Take Profit
-            // Profit for short is when price decreases (negative change vs entry)
-            // profit_pct variable above is (Current - Entry) / Entry. For short, -0.01 means 1% profit.
-            // Let's use correct profit calc for clarity
             let profit_pct = (pos.average_entry_price - candle.close) / pos.average_entry_price;
 
             if profit_pct >= 0.03 {
