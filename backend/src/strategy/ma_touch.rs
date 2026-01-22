@@ -54,6 +54,17 @@ impl Strategy for MATouchStrategy {
 
             // Entry trigger: price was below MA, touched MA (High >= MA), and rejected (Close < MA)
             if self.price_was_below_ma && candle.high >= ma && candle.close < ma {
+                // Log entry for debugging
+                tracing::info!(
+                    "ENTRY TRIGGERED: time={:?}, high={:.2}, low={:.2}, close={:.2}, ma25={:.2}, high>=ma:{}, close<ma:{}",
+                    candle.open_time,
+                    candle.high,
+                    candle.low,
+                    candle.close,
+                    ma,
+                    candle.high >= ma,
+                    candle.close < ma
+                );
                 // Open Short with 1/4 account size
                 let amount = equity * 0.25;
                 return Signal::Open(Side::Short, amount);

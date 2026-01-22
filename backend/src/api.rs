@@ -84,17 +84,42 @@ pub async fn run_backtest(
         });
 
         let result = tokio::task::spawn_blocking(move || -> Result<Vec<Trade>> {
+            // 1. Load 1-minute candle data
             let df = data_loader.load_candles(&payload.symbol, payload.start_date, payload.end_date)?;
-            // Convert DataFrame to LazyFrame for indicators
             let lf = df.lazy();
             
-            let lf_indicators = crate::indicators::add_indicators(lf)?;
+            // 2. Resample to 1-hour candles for strategy execution
+            let lf_1h = crate::indicators::resample_to_timeframe(lf.clone(), "1h")?;
             
-            let df = lf_indicators.collect()?;
-            let candles = candle_from_df(&df, &payload.symbol)?;
+            // 3. Add real moving averages on 1-hour data
+            let lf_1h_with_ma = crate::indicators::add_indicators(lf_1h)?;
+            let df_1h = lf_1h_with_ma.collect()?;
             
+            // 4. Also resample to 5-minute for charts
+            let lf_5m = crate::indicators::resample_to_timeframe(lf, "5m")?;
+            let lf_5m_with_ma = crate::indicators::add_indicators(lf_5m)?;
+            let df_5m = lf_5m_with_ma.collect()?;
+            
+            // 5. Save resampled DataFrames for chart generation
+            let data_dir = std::path::Path::new("/app/static/charts/data");
+            let _ = std::fs::create_dir_all(data_dir);
+            
+            let df_1h_path = data_dir.join(format!("{}_1h.parquet", payload.symbol));
+            let df_5m_path = data_dir.join(format!("{}_5m.parquet", payload.symbol));
+            
+            let mut file_1h = std::fs::File::create(&df_1h_path)?;
+            ParquetWriter::new(&mut file_1h).finish(&mut df_1h.clone())?;
+            
+            let mut file_5m = std::fs::File::create(&df_5m_path)?;
+            ParquetWriter::new(&mut file_5m).finish(&mut df_5m.clone())?;
+            
+            info!("Saved resampled data: {:?}, {:?}", df_1h_path, df_5m_path);
+            
+            let candles = candle_from_df(&df_1h, &payload.symbol)?;
+            
+            // 6. Run strategy on 1-hour candles with real MAs
             let mut engine = BacktestEngine::new(payload.initial_capital);
-            let strategy = MATouchStrategy::new(&df);
+            let strategy = MATouchStrategy::new(&df_1h);
             
             Ok(engine.run(&candles, strategy))
         }).await.unwrap();
@@ -188,13 +213,13 @@ use axum::response::Response;
 use axum::http::header;
 
 pub async fn get_chart_image(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<GetChartRequest>,
 ) -> impl IntoResponse {
     let filename = format!("{}_{}.png", params.symbol, params.timestamp);
     let file_path = std::path::Path::new("/app/static/charts").join(&filename);
 
-    // 1. Check if file exists
+    // 1. Check if chart PNG already exists
     if file_path.exists() {
         if let Ok(bytes) = std::fs::read(&file_path) {
             return Response::builder()
@@ -204,88 +229,64 @@ pub async fn get_chart_image(
         }
     }
 
-    // 2. Generate if not exists
-    let entry_time = DateTime::from_timestamp(params.timestamp, 0).unwrap_or(Utc::now());
+    // 2. Load saved resampled DataFrames from backtest (NO re-resampling!)
+    let data_dir = std::path::Path::new("/app/static/charts/data");
+    let df_1h_path = data_dir.join(format!("{}_1h.parquet", params.symbol));
+    let df_5m_path = data_dir.join(format!("{}_5m.parquet", params.symbol));
     
-    // Load data BEFORE entry time: -400 days to entry (to cover MA400)
-    let start_load = entry_time - chrono::Duration::days(400);
-    let end_load = entry_time;
-    
-    let df_result = state.data_loader.load_candles(&params.symbol, start_load, end_load);
-    
-    match df_result {
-        Ok(df) => {
-            let lf = df.lazy();
-            
-            // Daily Resampling (for all loaded data)
-            let daily_lf = lf.clone()
-                .group_by_dynamic(
-                    col("open_time"),
-                    vec![],
-                    DynamicGroupOptions {
-                        every: Duration::parse("1d"),
-                        period: Duration::parse("1d"),
-                        offset: Duration::parse("0s"),
-                        ..Default::default()
-                    }
-                )
-                .agg(vec![
-                    col("open").first(),
-                    col("high").max(),
-                    col("low").min(),
-                    col("close").last(),
-                ])
-                .collect();
-
-            // 5-minute resampling (entire range for MA calculations)
-            let hourly_lf = lf
-                .group_by_dynamic(
-                    col("open_time"),
-                    vec![],
-                    DynamicGroupOptions {
-                        every: Duration::parse("5m"),
-                        period: Duration::parse("5m"),
-                        offset: Duration::parse("0s"),
-                        ..Default::default()
-                    }
-                )
-                .agg(vec![
-                    col("open").first(),
-                    col("high").max(),
-                    col("low").min(),
-                    col("close").last(),
-                ])
-                .collect();
-
-            if let (Ok(daily_df), Ok(hourly_df)) = (daily_lf, hourly_lf) {
-                // Generate and Save
-                match crate::charting::generate_stacked_chart(&hourly_df, &daily_df, params.timestamp) {
-                    Ok(bytes) => {
-                        // Ensure directory exists
-                        let _ = std::fs::create_dir_all("/app/static/charts");
-                        // Save to file
-                        if let Err(e) = std::fs::write(&file_path, &bytes) {
-                             error!("Failed to save chart to file: {}", e);
-                        }
-                        
-                        return Response::builder()
-                            .header(header::CONTENT_TYPE, "image/png")
-                            .body(axum::body::Body::from(bytes))
-                            .unwrap();
-                    },
-                    Err(e) => error!("Failed to generate chart: {}", e),
-                }
-            } else {
-                error!("Failed to resample data");
-            }
-        },
-        Err(e) => error!("Failed to load data for chart: {}", e),
+    if !df_1h_path.exists() || !df_5m_path.exists() {
+        error!("Backtest data files not found: {:?}, {:?}", df_1h_path, df_5m_path);
+        return Response::builder()
+            .status(404)
+            .body(axum::body::Body::from("Backtest data not found. Run backtest first."))
+            .unwrap();
     }
-
-    Response::builder()
-        .status(500)
-        .body(axum::body::Body::from("Failed to generate chart"))
-        .unwrap()
+    
+    // Load from Parquet files
+    let hourly_df = match ParquetReader::new(std::fs::File::open(&df_1h_path).unwrap()).finish() {
+        Ok(df) => df,
+        Err(e) => {
+            error!("Failed to read 1H parquet: {}", e);
+            return Response::builder()
+                .status(500)
+                .body(axum::body::Body::from("Failed to read data"))
+                .unwrap();
+        }
+    };
+    
+    let fivemin_df = match ParquetReader::new(std::fs::File::open(&df_5m_path).unwrap()).finish() {
+        Ok(df) => df,
+        Err(e) => {
+            error!("Failed to read 5M parquet: {}", e);
+            return Response::builder()
+                .status(500)
+                .body(axum::body::Body::from("Failed to read data"))
+                .unwrap();
+        }
+    };
+    
+    // 3. Generate chart using the SAME data from backtest
+    match crate::charting::generate_stacked_chart(&hourly_df, &fivemin_df, params.timestamp) {
+        Ok(bytes) => {
+            // Save to file
+            let _ = std::fs::create_dir_all("/app/static/charts");
+            if let Err(e) = std::fs::write(&file_path, &bytes) {
+                error!("Failed to save chart to file: {}", e);
+            }
+            
+            Response::builder()
+                .header(header::CONTENT_TYPE, "image/png")
+                .body(axum::body::Body::from(bytes))
+                .unwrap()
+        },
+        Err(e) => {
+            error!("Failed to generate chart: {}", e);
+            Response::builder()
+                .status(500)
+                .body(axum::body::Body::from("Failed to generate chart"))
+                .unwrap()
+        }
+    }
 }
 
 fn candle_from_df(df: &DataFrame, symbol: &str) -> Result<Vec<crate::data::Candle>> {
